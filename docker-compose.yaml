@@ -1,0 +1,61 @@
+services:
+  db:
+    build: ./db/
+    ports:
+      - 5432:5432
+    environment:
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=eve@123
+      - POSTGRES_DB=pt_start
+    env_file:
+      - .env
+    command: |
+      postgres
+      -c archive_mode=on
+      -c archive_command='cp %p /oracle/pg_data/archive/%f'
+      -c wal_log_hints=on
+      -c wal_level=replica
+      -c hot_standby=on
+      -c max_wal_senders=10
+      -c max_replication_slots=10
+      -c hot_standby_feedback=on
+      -c log_replication_commands=on
+      -c logging_collector=on
+      -c log_directory=/var/log/postgresql/
+    volumes:
+      - log_volume:/var/log/postgresql/
+  app:
+    build: ./bot/
+    depends_on:
+      - db
+    volumes:
+      - log_volume:/log
+    env_file:
+      - .env
+  db_repl:
+    build: ./db_repl/
+    depends_on:
+      - db
+    ports:
+      - 5433:5432
+    command: |
+      bash -c "
+      until echo $$DB_REPL_PASSWORD | pg_basebackup --pgdata=/var/lib/postgresql/data/ -R --username=$$DB_REPL_USER --host=$$DB_HOST --port=5432
+      do
+        echo 'Waiting for primary to connect...'
+        sleep 1s
+      done
+      echo 'Backup done, starting replica...'
+      chown -R postgres:postgres /var/lib/postgresql/data/
+      chmod 0700 /var/lib/postgresql/data/
+      su postgres -c 'postgres'
+      "
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: eve@123
+      DB_HOST: db
+      DB_REPL_USER: repl_user
+      DB_REPL_PASSWORD: eve@123
+
+volumes:
+  log_volume:
