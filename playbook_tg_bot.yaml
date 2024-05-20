@@ -1,0 +1,176 @@
+- name: Install packages
+  hosts: all
+  become: yes
+  tasks:
+
+  - name: Update apt cache
+    ansible.builtin.apt:
+      update_cache: yes
+
+  - name: Install packages
+    ansible.builtin.apt:
+      name: ['python3', 'postgresql-15', 'postgresql-contrib', 'pip']
+      state: present
+
+- name: Set up master database
+  hosts: bot_master_db
+  become: yes
+  vars:
+    db_repl_user: "{{ DB_REPL_USER }}"
+    db_name: "{{ DB_DATABASE }}"
+    db_user: "{{ DB_USER }}"
+    db_pass: "{{ DB_PASSWORD }}"
+    db_port: "{{ DB_PORT }}"
+  tasks:
+  - name: Download project
+    ansible.builtin.git:
+      repo: 'https://github.com/caxapok1python/pt-bot'
+      dest: '/pt_bot'
+      version: docker
+    ignore_errors: true
+
+  - name: Install requirements
+    ansible.builtin.pip:
+      requirements: /pt_bot/bot/requirements.txt
+
+  - name: Stop db
+    ansible.builtin.service:
+      name: postgresql
+      state: stopped
+
+  - name: Create master conf
+    ansible.builtin.template:
+      src: ./config-postgresql
+      dest: /etc/postgresql/15/main/postgresql.conf
+      owner: "{{ db_user }}"
+      group: "{{ db_user }}"
+      mode: 0644
+
+  - name: Edit master conf
+    ansible.builtin.lineinfile:
+        path: /etc/postgresql/15/main/postgresql.conf
+        regexp: 'port ='
+        line: 'port = {{ db_port }}'
+        backrefs: yes
+        state: present
+
+  - name: Create MASTER_DB pg_hba.conf
+    ansible.builtin.template:
+      src: ./pg_hba.conf
+      dest: /etc/postgresql/15/main/pg_hba.conf
+      owner: "{{ db_user }}"
+      group: "{{ db_user }}"
+      mode: 0644
+
+  - name: Create log_dir
+    file:
+      state: directory
+      path: "{{ item }}"
+      owner: "{{ db_user }}"
+      group: "{{ db_user }}"
+    loop:
+      - /oracle/pg_data/
+      - /db_logs
+
+  - name: Change owner for run/postgres
+    file:
+      path: /run/postgresql
+      owner: "{{ db_user }}"
+      group: "{{ db_user }}"
+
+  - name: Start db
+    ansible.builtin.service:
+      name: postgresql
+      state: started
+
+  - name: Set password for the default postgresql user
+    command: psql -c "ALTER USER postgres WITH PASSWORD '{{ db_pass }}';"
+    become_user: "{{ db_user }}"
+    ignore_errors: yes
+
+  - name: Create MASTER_DB
+    become_user: "{{ db_user }}"
+    command: psql -c "CREATE DATABASE {{ db_name }};"
+
+  - name: Init MASTER_DB
+    become_user: "{{ db_user }}"
+    command: psql -f /pt_bot/db/init.sql -d "{{ db_name }}"
+
+- name: Set up slave db
+  hosts: slave_db
+  become: yes
+  vars:
+    db_repl_user: "{{ DB_REPL_USER }}"
+    db_name: "{{ DB_DATA }}"
+    db_user: "{{ DB_USER }}"
+    db_pass: "{{ DB_PASSWORD }}"
+    db_repl_port: "{{ DB_REPL_PORT }}"
+  tasks:
+
+  - name: Stop db
+    ansible.builtin.service:
+      name: postgresql
+      state: stopped
+
+  - name: Edit slave conf
+    ansible.builtin.lineinfile:
+        path: /etc/postgresql/15/main/postgresql.conf
+        regexp: 'port ='
+        line: 'port = {{ db_repl_port }}'
+        backrefs: yes
+        state: present
+
+  - name: Create slave log directory
+    file:
+      state: directory
+      path: /db_logs
+      owner: "{{ db_user }}"
+      group: "{{ db_user }}"
+
+  - name: Clear slave db
+    ansible.builtin.shell: |
+       rm -rf /var/lib/postgresql/15/main/*
+    become_user: root
+
+  - name: Replicate DB
+    shell: |
+      su - postgres -c "export PGPASSWORD='{{ db_pass }}' && pg_basebackup -h '{{ DB_HOST }}' --pgdata=/var/lib/postgresql/15/main --port='{{ DB_PORT }}' --username='{{ DB_REPL_USER }}' -R"
+    environment:
+        PGPASSWORD: "{{ db_pass }}"
+    become_user: root
+
+  - name: Start SLAVE_DB
+    ansible.builtin.service:
+      name: postgresql
+      state: started
+
+- name: Start bot
+  hosts: bot_master_db
+  become: yes
+  tasks:
+
+  - name: Copy .env
+    command: cp "{{ lookup('env', 'PWD') }}"/.env /pt_bot/.env
+
+  - name: Create bot systemd unit file
+    file:
+      state: touch
+      path: /etc/systemd/system/bot.service
+
+  - name: Update bot system unit file
+    file:
+      path: /etc/systemd/system/bot.service
+      mode: 0640
+
+  - name: Edit bot unit file
+    shell: |
+      echo "[Unit]\nDescription=pt_bot\nAfter=network.target\n[Service]\nUser=root\nWorkingDirectory=/\nExecStart=/usr/bin/python3 /pt_bot/bot/bot.py\nRestart=always\nEnvironment='PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin'\n[Install]\nWantedBy=multi-user.target" > /etc/systemd/system/bot.service
+
+  - name: Reload systemd to recognize the new service
+    ansible.builtin.service:
+      daemon_reload: yes
+
+  - name: Start bot
+    ansible.builtin.service:
+      name: bot
+      state: restarted

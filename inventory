@@ -1,0 +1,19 @@
+[host_group]
+bot_master_db ansible_host= ansible_user= ansible_password=
+slave_db ansible_host= ansible_user= ansible_password=
+
+[host_group:vars]
+TOKEN=
+RM_HOST=
+RM_PORT=
+RM_USER=
+RM_PASSWORD=
+DB_USER=
+DB_PASSWORD=
+DB_HOST=
+DB_PORT=
+DB_DATABASE=
+DB_REPL_USER=
+DB_REPL_PASSWORD=
+DB_REPL_HOST=
+DB_REPL_PORT=
